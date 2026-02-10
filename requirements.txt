@@ -4,3 +4,4 @@ opencv-python-headless
 mediapipe
 av
 numpy
+edge-tts
