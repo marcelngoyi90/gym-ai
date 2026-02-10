@@ -131,22 +131,19 @@ if ctx.video_processor:
         ctx.video_processor.counter = 0
         st.session_state.reset_trigger = False
 
-# We use a placeholder to inject the voice script without reloading the whole page
+# Voice Logic
 status_placeholder = st.empty()
 previous_count = 0
 
 if ctx.state.playing:
     while True:
-        # Check if the stream is still active
         if ctx.video_processor:
             current_count = ctx.video_processor.counter
             
-            # If the count increased, Speak!
             if current_count > previous_count:
                 previous_count = current_count
                 
-                # JAVASCRIPT INJECTION (The "Voice" Trick)
-                # This uses the browser's built-in Text-to-Speech
+                # THE FIXED PART:
                 js_code = f"""
                     <script>
                     var msg = new SpeechSynthesisUtterance("{current_count}");
@@ -154,8 +151,8 @@ if ctx.state.playing:
                     window.speechSynthesis.speak(msg);
                     </script>
                 """
-                # Inject the JS invisible to the user
-                status_placeholder.components.v1.html(js_code, height=0, width=0)
+                # We use the context manager 'with' to inject safely
+                with status_placeholder:
+                    html(js_code, height=0, width=0)
         
-        # Small sleep to prevent CPU spike
         time.sleep(0.1)
