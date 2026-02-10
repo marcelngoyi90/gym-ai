@@ -10,11 +10,25 @@ st.set_page_config(page_title="AI Gym Coach", layout="centered")
 
 st.title("🏋️ AI Gym Coach")
 
-# --- 2. MAIN MENU CONTROLS ---
-# Exercise Selection (Now on main screen)
-mode = st.radio("Select Exercise:", ["Bicep Curl", "Squat"], horizontal=True)
+# --- 2. MAIN CONTROL DASHBOARD ---
+# Create two columns to layout the controls side-by-side
+col1, col2 = st.columns([3, 1])
 
-# Instructions Bloc (Dynamic based on selection)
+with col1:
+    # Exercise Selector
+    mode = st.radio("Select Exercise:", ["Bicep Curl", "Squat"], horizontal=True)
+
+with col2:
+    # Reset Button (We add a little vertical space so it aligns nicely)
+    st.write("") 
+    st.write("")
+    if st.button("Reset Reps"):
+        if "reset_trigger" not in st.session_state:
+            st.session_state.reset_trigger = True
+        else:
+            st.session_state.reset_trigger = True
+
+# Instructions Bloc
 if mode == "Bicep Curl":
     st.info("💪 **Instructions:** Stand sideways, show your arm clearly, and curl up to your shoulder.")
 else:
@@ -22,20 +36,13 @@ else:
 
 st.write("---")
 
-# --- 3. SIDEBAR SETTINGS (Tech Stuff) ---
+# --- 3. SIDEBAR (Technical Settings) ---
 st.sidebar.header("Camera Settings")
 
 # Camera Selection
 cam_options = {"Front Camera (User)": "user", "Back Camera (Environment)": "environment"}
 cam_label = st.sidebar.radio("Select Camera:", list(cam_options.keys()))
 facing_mode = cam_options[cam_label]
-
-# Reset Button
-if st.sidebar.button("Reset Counter"):
-    if "reset_trigger" not in st.session_state:
-        st.session_state.reset_trigger = True
-    else:
-        st.session_state.reset_trigger = True
 
 # --- 4. THE AI PROCESSOR ---
 class GymProcessor(VideoTransformerBase):
@@ -48,8 +55,7 @@ class GymProcessor(VideoTransformerBase):
         self.counter = 0
         self.stage = "down"
         self.mode = "Bicep Curl"  # Default
-        self.feedback = ""
-
+        
     def calculate_angle(self, a, b, c):
         a = np.array(a)
         b = np.array(b)
@@ -62,7 +68,7 @@ class GymProcessor(VideoTransformerBase):
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         
-        # Optional: Flip image if using front camera for mirror effect
+        # Optional: Flip image for mirror effect
         # img = cv2.flip(img, 1) 
         
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
