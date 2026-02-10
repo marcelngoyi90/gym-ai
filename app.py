@@ -4,6 +4,8 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import av
+import time
+from streamlit.components.v1 import html
 
 # --- 1. SETUP ---
 st.set_page_config(page_title="AI Gym Coach", layout="centered")
@@ -11,15 +13,12 @@ st.set_page_config(page_title="AI Gym Coach", layout="centered")
 st.title("🏋️ AI Gym Coach")
 
 # --- 2. MAIN CONTROL DASHBOARD ---
-# Create two columns to layout the controls side-by-side
 col1, col2 = st.columns([3, 1])
 
 with col1:
-    # Exercise Selector
     mode = st.radio("Select Exercise:", ["Bicep Curl", "Squat"], horizontal=True)
 
 with col2:
-    # Reset Button (We add a little vertical space so it aligns nicely)
     st.write("") 
     st.write("")
     if st.button("Reset Reps"):
@@ -28,7 +27,7 @@ with col2:
         else:
             st.session_state.reset_trigger = True
 
-# Instructions Bloc
+# Instructions
 if mode == "Bicep Curl":
     st.info("💪 **Instructions:** Stand sideways, show your arm clearly, and curl up to your shoulder.")
 else:
@@ -36,10 +35,8 @@ else:
 
 st.write("---")
 
-# --- 3. SIDEBAR (Technical Settings) ---
+# --- 3. SIDEBAR SETTINGS ---
 st.sidebar.header("Camera Settings")
-
-# Camera Selection
 cam_options = {"Front Camera (User)": "user", "Back Camera (Environment)": "environment"}
 cam_label = st.sidebar.radio("Select Camera:", list(cam_options.keys()))
 facing_mode = cam_options[cam_label]
@@ -54,7 +51,7 @@ class GymProcessor(VideoTransformerBase):
         # Variables
         self.counter = 0
         self.stage = "down"
-        self.mode = "Bicep Curl"  # Default
+        self.mode = "Bicep Curl" 
         
     def calculate_angle(self, a, b, c):
         a = np.array(a)
@@ -67,9 +64,6 @@ class GymProcessor(VideoTransformerBase):
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        
-        # Optional: Flip image for mirror effect
-        # img = cv2.flip(img, 1) 
         
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = self.pose.process(img_rgb)
@@ -98,33 +92,24 @@ class GymProcessor(VideoTransformerBase):
                 
                 # COUNTING LOGIC
                 if self.mode == "Squat":
-                    if angle < 90: 
-                        self.stage = "deep"
+                    if angle < 90: self.stage = "deep"
                     if angle > 160 and self.stage == 'deep':
                         self.stage = "up"
                         self.counter += 1
                 else: # Curl
-                    if angle > 160: 
-                        self.stage = "down"
+                    if angle > 160: self.stage = "down"
                     if angle < 30 and self.stage == 'down':
                         self.stage = "up"
                         self.counter += 1
 
-                # VISUALS
+                # Draw Visuals
                 self.mp_drawing.draw_landmarks(img, results.pose_landmarks, self.mp_pose.POSE_CONNECTIONS)
-                
-                # Stats Box
                 cv2.rectangle(img, (0,0), (250, 80), (245, 117, 16), -1)
-                
-                # Reps
                 cv2.putText(img, "REPS", (15,25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1, cv2.LINE_AA)
                 cv2.putText(img, str(self.counter), (10,70), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 2, cv2.LINE_AA)
-                
-                # Mode
                 cv2.putText(img, "MODE", (90,25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1, cv2.LINE_AA)
                 cv2.putText(img, self.mode, (90,70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2, cv2.LINE_AA)
                 
-                # Angle
                 p2_px = tuple(np.multiply(p2, [w, h]).astype(int))
                 cv2.putText(img, str(int(angle)), p2_px, cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
 
@@ -138,10 +123,39 @@ ctx = webrtc_streamer(
     rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
 
-# --- 6. DATA SYNC ---
+# --- 6. VOICE FEEDBACK LOOP ---
 if ctx.video_processor:
+    # Sync Sidebar Settings
     ctx.video_processor.mode = mode
-    
     if "reset_trigger" in st.session_state and st.session_state.reset_trigger:
         ctx.video_processor.counter = 0
         st.session_state.reset_trigger = False
+
+# We use a placeholder to inject the voice script without reloading the whole page
+status_placeholder = st.empty()
+previous_count = 0
+
+if ctx.state.playing:
+    while True:
+        # Check if the stream is still active
+        if ctx.video_processor:
+            current_count = ctx.video_processor.counter
+            
+            # If the count increased, Speak!
+            if current_count > previous_count:
+                previous_count = current_count
+                
+                # JAVASCRIPT INJECTION (The "Voice" Trick)
+                # This uses the browser's built-in Text-to-Speech
+                js_code = f"""
+                    <script>
+                    var msg = new SpeechSynthesisUtterance("{current_count}");
+                    msg.rate = 1.0; 
+                    window.speechSynthesis.speak(msg);
+                    </script>
+                """
+                # Inject the JS invisible to the user
+                status_placeholder.components.v1.html(js_code, height=0, width=0)
+        
+        # Small sleep to prevent CPU spike
+        time.sleep(0.1)
