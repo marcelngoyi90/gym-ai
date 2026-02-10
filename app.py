@@ -64,8 +64,9 @@ class GymProcessor(VideoTransformerBase):
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        
+        img = cv2.flip(img, 1)
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
         results = self.pose.process(img_rgb)
         
         h, w, _ = img.shape
