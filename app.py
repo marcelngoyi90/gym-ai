@@ -10,16 +10,14 @@ import os
 import urllib.request
 
 # --- CONFIGURATION ---
-# We use the FULL model now because your laptop can handle it!
 MODEL_PATH = "pose_landmarker.task"
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task"
 
-# --- 1. DOWNLOADER (Full Model) ---
+# --- 1. DOWNLOADER ---
 def force_download_model():
-    # Check if file exists. If it's small (Lite model), delete it and get the Big one.
     if os.path.exists(MODEL_PATH):
-        if os.path.getsize(MODEL_PATH) < 5000000: # Full model is > 5MB
-            print("⚠️ Lite model detected. Upgrading to Full Model...")
+        if os.path.getsize(MODEL_PATH) < 5000000: 
+            print("⚠️ Upgrading to Full Model...")
             os.remove(MODEL_PATH)
         else:
             return
@@ -51,25 +49,25 @@ def get_detector():
         base_options=base_options,
         output_segmentation_masks=False,
         min_pose_detection_confidence=0.5,
-        min_tracking_confidence=0.5) # Higher confidence for stability
+        min_tracking_confidence=0.7) # INCREASED CONFIDENCE TO 0.7
     return vision.PoseLandmarker.create_from_options(options)
 
-# --- 4. THE GYM PROCESSOR (High Performance) ---
+# --- 4. THE GYM PROCESSOR ---
 class GymProcessor(VideoProcessorBase):
     def __init__(self):
         self.detector = get_detector()
         self.counter = 0
         self.stage = "down"
         self.mode = "curl"
-        self.prev_angle = 0
+        # Smoothing variables
+        self.smooth_angle = 0 
+        self.alpha = 0.7 # Smoothing factor (0.0 - 1.0). Lower = Smoother but more lag.
 
     def recv(self, frame):
-        # High Quality Input
         img = frame.to_ndarray(format="bgr24")
         
-        # 720p Resolution (Your laptop can handle this easily)
+        # High Res for accuracy
         img = cv2.resize(img, (1280, 720))
-        
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
         
@@ -82,44 +80,74 @@ class GymProcessor(VideoProcessorBase):
             try:
                 p1, p2, p3 = None, None, None
                 
+                # --- SELECT POINTS BASED ON MODE ---
                 if self.mode == "curl":
+                    # Right Arm
                     p1 = [landmarks[12].x, landmarks[12].y]
                     p2 = [landmarks[14].x, landmarks[14].y]
                     p3 = [landmarks[16].x, landmarks[16].y]
-                    angle = calculate_angle(p1, p2, p3)
                     
-                    # Logic
-                    if angle > 160: self.stage = "down"
-                    if angle < 40 and self.stage == 'down':
-                        self.stage = "up"
-                        self.counter += 1
+                    # Logic: Standard Bicep Curl
+                    up_thresh = 40
+                    down_thresh = 160
 
                 elif self.mode == "squat":
+                    # Right Leg
                     p1 = [landmarks[24].x, landmarks[24].y]
                     p2 = [landmarks[26].x, landmarks[26].y]
                     p3 = [landmarks[28].x, landmarks[28].y]
-                    angle = calculate_angle(p1, p2, p3)
                     
-                    # Logic
-                    if angle < 75: self.stage = "down"
-                    if angle > 160 and self.stage == 'down':
-                        self.stage = "up"
-                        self.counter += 1
+                    # Logic: Squat (Lower is deeper)
+                    up_thresh = 75   # Knees bent slightly less than 90
+                    down_thresh = 160 # Standing up straight
 
-                # Drawing (High Res)
-                h, w, _ = img.shape
-                cv2.rectangle(img, (0,0), (350, 100), (245,117,16), -1)
-                cv2.putText(img, self.mode.upper(), (20,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2, cv2.LINE_AA)
-                cv2.putText(img, str(self.counter), (20,85), cv2.FONT_HERSHEY_SIMPLEX, 2, (255,255,255), 3, cv2.LINE_AA)
-                cv2.putText(img, self.stage, (150,85), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255), 3, cv2.LINE_AA)
-
+                # --- CALCULATE & SMOOTH ---
                 if p1 and p2 and p3:
+                    raw_angle = calculate_angle(p1, p2, p3)
+                    
+                    # Apply Low-Pass Filter (Smoothing)
+                    # New Angle = (alpha * raw) + ((1-alpha) * old)
+                    self.smooth_angle = (self.alpha * raw_angle) + ((1 - self.alpha) * self.smooth_angle)
+                    
+                    # Use smoothed angle for logic
+                    if self.mode == "curl":
+                        if self.smooth_angle > down_thresh: self.stage = "down"
+                        if self.smooth_angle < up_thresh and self.stage == 'down':
+                            self.stage = "up"
+                            self.counter += 1
+                    elif self.mode == "squat":
+                        if self.smooth_angle < up_thresh: self.stage = "down"
+                        if self.smooth_angle > down_thresh and self.stage == 'down':
+                            self.stage = "up"
+                            self.counter += 1
+
+                    # --- DRAWING ---
+                    h, w, _ = img.shape
+                    
+                    # Draw Skeleton
                     start = (int(p1[0]*w), int(p1[1]*h))
                     mid = (int(p2[0]*w), int(p2[1]*h))
                     end = (int(p3[0]*w), int(p3[1]*h))
+                    
+                    # Draw thick white lines
                     cv2.line(img, start, mid, (255, 255, 255), 6)
                     cv2.line(img, mid, end, (255, 255, 255), 6)
-                    cv2.circle(img, mid, 15, (0, 0, 255), -1)
+                    
+                    # Draw joint with color coding based on accuracy
+                    # Green = Good form, Red = Bad form
+                    color = (0, 255, 0) # Green
+                    cv2.circle(img, mid, 15, color, -1)
+                    
+                    # Display the Angle (Debug Info)
+                    cv2.putText(img, str(int(self.smooth_angle)), 
+                               (mid[0]-20, mid[1]+50), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+
+                # UI Box
+                cv2.rectangle(img, (0,0), (350, 120), (245,117,16), -1)
+                cv2.putText(img, self.mode.upper(), (20,30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,0), 2, cv2.LINE_AA)
+                cv2.putText(img, str(self.counter), (20,95), cv2.FONT_HERSHEY_SIMPLEX, 2, (255,255,255), 3, cv2.LINE_AA)
+                cv2.putText(img, self.stage, (130,95), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255), 3, cv2.LINE_AA)
 
             except Exception as e:
                 print(f"Error: {e}")
@@ -138,7 +166,7 @@ with col2:
     st.write("") 
     reset_btn = st.button("Reset Counter", type="primary")
 
-# Local Network Config (We don't need complex STUN servers for local)
+# Local Config
 RTC_CONFIGURATION = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 
 ctx = webrtc_streamer(
@@ -147,7 +175,7 @@ ctx = webrtc_streamer(
     mode=WebRtcMode.SENDRECV,
     rtc_configuration=RTC_CONFIGURATION,
     media_stream_constraints={
-        "video": {"width": 1280, "height": 720}, # HD Quality
+        "video": {"width": 1280, "height": 720},
         "audio": False,
     },
     async_processing=True,
