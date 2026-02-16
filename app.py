@@ -9,7 +9,7 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
-# --- MATH HELPER ---
+# --- MATH HELPERS ---
 def calculate_angle(a, b, c):
     a = np.array(a)
     b = np.array(b)
@@ -32,6 +32,7 @@ class GymProcessor(VideoProcessorBase):
         self.mode = "curl"
         self.smooth_angle = 0
         self.alpha = 0.8 
+        self.reset_cooldown = 0
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
@@ -44,7 +45,24 @@ class GymProcessor(VideoProcessorBase):
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
             try:
-                # Get points for the left side (standardized)
+                # --- DETECT X-CROSS GESTURE ---
+                # Check if Right Wrist is to the LEFT of Left Shoulder 
+                # AND Left Wrist is to the RIGHT of Right Shoulder
+                l_wrist = landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value]
+                r_wrist = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value]
+                l_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
+                r_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
+
+                # In a flipped image, if wrists cross past the opposite shoulders:
+                if r_wrist.x > l_shoulder.x and l_wrist.x < r_shoulder.x and self.reset_cooldown == 0:
+                    self.counter = 0
+                    self.reset_cooldown = 40 # Prevent flickering reset
+                
+                if self.reset_cooldown > 0:
+                    self.reset_cooldown -= 1
+
+                # --- EXERCISE LOGIC ---
+                # Using Left side for calculations
                 shoulder = [landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value].x, landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value].y]
                 elbow = [landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].y]
                 wrist = [landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value].x, landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value].y]
@@ -52,30 +70,21 @@ class GymProcessor(VideoProcessorBase):
                 knee = [landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].y]
                 ankle = [landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].y]
 
-                # --- CALC ANGLE ---
-                if self.mode == "curl" or self.mode == "pushup":
+                if self.mode in ["curl", "pushup"]:
                     raw_angle = calculate_angle(shoulder, elbow, wrist)
                 else: # Squat
                     raw_angle = calculate_angle(hip, knee, ankle)
                 
                 self.smooth_angle = (self.alpha * raw_angle) + ((1 - self.alpha) * self.smooth_angle)
 
-                # --- FRONT-FACING PUSHUP LOGIC ---
                 if self.mode == "pushup":
-                    # When facing the camera, elbows flare out. 
-                    # 'Down' is usually around 70-90 degrees.
-                    # 'Up' is 150+ degrees.
-                    if self.smooth_angle < 90:
-                        self.stage = "down"
-                    if self.smooth_angle > 150 and self.stage == "down":
-                        self.stage = "up"
-                        self.counter += 1
-
+                    if self.smooth_angle < 95: self.stage = "down"
+                    if self.smooth_angle > 155 and self.stage == "down":
+                        self.stage = "up"; self.counter += 1
                 elif self.mode == "curl":
                     if self.smooth_angle > 160: self.stage = "down"
                     if self.smooth_angle < 40 and self.stage == 'down':
                         self.stage = "up"; self.counter += 1
-
                 elif self.mode == "squat":
                     if self.smooth_angle < 80: self.stage = "down"
                     if self.smooth_angle > 160 and self.stage == 'down':
@@ -85,11 +94,14 @@ class GymProcessor(VideoProcessorBase):
                 mp_drawing.draw_landmarks(img, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
                 
                 # Visual UI
-                cv2.rectangle(img, (0,0), (450, 120), (245,117,16), -1)
+                cv2.rectangle(img, (0,0), (550, 120), (245,117,16), -1)
                 cv2.putText(img, f"MODE: {self.mode.upper()}", (20,30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,0), 2, cv2.LINE_AA)
                 cv2.putText(img, f"REPS: {self.counter}", (20,95), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255), 3, cv2.LINE_AA)
                 
-                # Color feedback for the stage
+                # Reset Visual Feedback
+                if self.reset_cooldown > 20:
+                    cv2.putText(img, "COUNTER RESET!", (600, 360), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 5)
+
                 stage_color = (0, 255, 0) if self.stage == "up" else (0, 255, 255)
                 cv2.putText(img, self.stage.upper(), (280,95), cv2.FONT_HERSHEY_SIMPLEX, 1.2, stage_color, 2, cv2.LINE_AA)
 
@@ -99,18 +111,18 @@ class GymProcessor(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # --- UI SETUP ---
-st.set_page_config(page_title="Gym AI Pro", layout="wide")
-st.title("Gym AI Coach: Front-Facing Enabled 🏋️‍♂️")
+st.set_page_config(page_title="Gym AI Gesture", layout="wide")
+st.title("Gym AI Coach: 'X' Gesture Reset 🙅‍♂️")
 
 col1, col2 = st.columns([2, 1])
 with col1:
     mode_selection = st.radio("Select Exercise:", ["Bicep Curl", "Squat", "Pushup"], horizontal=True)
 with col2:
-    st.write(""); st.write("") 
-    reset_btn = st.button("Reset Counter", type="primary")
+    st.info("💡 Cross your arms in an 'X' to reset the counter!")
+    reset_btn = st.button("Manual Reset", type="primary")
 
 ctx = webrtc_streamer(
-    key="gym-ai-front", 
+    key="gym-ai-x-gesture", 
     video_processor_factory=GymProcessor,
     mode=WebRtcMode.SENDRECV,
     rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
