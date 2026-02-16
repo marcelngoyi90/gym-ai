@@ -1,34 +1,15 @@
 import cv2
 import av
 import mediapipe as mp
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
 import numpy as np
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
-import os
-import urllib.request
 
-# --- CONFIGURATION ---
-MODEL_PATH = "pose_landmarker.task"
-MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task"
+# --- INITIALIZE MEDIAPIPE ---
+mp_pose = mp.solutions.pose
+mp_drawing = mp.solutions.drawing_utils
 
-# --- 1. DOWNLOADER ---
-def force_download_model():
-    if os.path.exists(MODEL_PATH):
-        if os.path.getsize(MODEL_PATH) < 5000000: 
-            print("⚠️ Upgrading to Full Model...")
-            os.remove(MODEL_PATH)
-        else:
-            return
-    print(f"📥 Downloading Full AI Model...")
-    try:
-        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-        print("✅ Download Complete!")
-    except Exception as e:
-        st.error(f"Failed to download model: {e}")
-
-# --- 2. MATH HELPER ---
+# --- MATH HELPER ---
 def calculate_angle(a, b, c):
     a = np.array(a)
     b = np.array(b)
@@ -38,125 +19,85 @@ def calculate_angle(a, b, c):
     if angle > 180.0: angle = 360 - angle
     return angle
 
-# --- 3. AI LOADER ---
-@st.cache_resource
-def get_detector():
-    force_download_model()
-    if not os.path.exists(MODEL_PATH): return None
-    
-    base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
-    options = vision.PoseLandmarkerOptions(
-        base_options=base_options,
-        output_segmentation_masks=False,
-        min_pose_detection_confidence=0.5,
-        min_tracking_confidence=0.7) # INCREASED CONFIDENCE TO 0.7
-    return vision.PoseLandmarker.create_from_options(options)
-
-# --- 4. THE GYM PROCESSOR ---
+# --- THE GYM PROCESSOR ---
 class GymProcessor(VideoProcessorBase):
     def __init__(self):
-        self.detector = get_detector()
+        # Initialize Pose solution here
+        self.pose = mp_pose.Pose(
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7,
+            model_complexity=1 # 0=Lite, 1=Full, 2=Heavy. 1 is best for local.
+        )
         self.counter = 0
         self.stage = "down"
         self.mode = "curl"
-        # Smoothing variables
-        self.smooth_angle = 0 
-        self.alpha = 0.7 # Smoothing factor (0.0 - 1.0). Lower = Smoother but more lag.
+        
+        # Smoothing
+        self.smooth_angle = 0
+        self.alpha = 0.8 # Higher = more responsive, Lower = smoother
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         
-        # High Res for accuracy
+        # Flip image for "mirror effect" and resize for UI
+        img = cv2.flip(img, 1)
         img = cv2.resize(img, (1280, 720))
+        
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+        results = self.pose.process(img_rgb)
         
-        if self.detector is None: return av.VideoFrame.from_ndarray(img, format="bgr24")
-
-        detection_result = self.detector.detect(mp_image)
-        
-        if detection_result.pose_landmarks:
-            landmarks = detection_result.pose_landmarks[0]
+        if results.pose_landmarks:
+            landmarks = results.pose_landmarks.landmark
             try:
-                p1, p2, p3 = None, None, None
-                
-                # --- SELECT POINTS BASED ON MODE ---
+                # Get coordinates
                 if self.mode == "curl":
-                    # Right Arm
-                    p1 = [landmarks[12].x, landmarks[12].y]
-                    p2 = [landmarks[14].x, landmarks[14].y]
-                    p3 = [landmarks[16].x, landmarks[16].y]
-                    
-                    # Logic: Standard Bicep Curl
-                    up_thresh = 40
-                    down_thresh = 160
+                    # Right side points (flipped because of mirror)
+                    p1 = [landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value].x, landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value].y]
+                    p2 = [landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].y]
+                    p3 = [landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value].x, landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value].y]
+                    up_thresh, down_thresh = 40, 160
+                else:
+                    # Squat points
+                    p1 = [landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].x, landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].y]
+                    p2 = [landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].y]
+                    p3 = [landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].y]
+                    up_thresh, down_thresh = 80, 160
 
-                elif self.mode == "squat":
-                    # Right Leg
-                    p1 = [landmarks[24].x, landmarks[24].y]
-                    p2 = [landmarks[26].x, landmarks[26].y]
-                    p3 = [landmarks[28].x, landmarks[28].y]
-                    
-                    # Logic: Squat (Lower is deeper)
-                    up_thresh = 75   # Knees bent slightly less than 90
-                    down_thresh = 160 # Standing up straight
+                # Angle Calculation & Smoothing
+                raw_angle = calculate_angle(p1, p2, p3)
+                self.smooth_angle = (self.alpha * raw_angle) + ((1 - self.alpha) * self.smooth_angle)
 
-                # --- CALCULATE & SMOOTH ---
-                if p1 and p2 and p3:
-                    raw_angle = calculate_angle(p1, p2, p3)
-                    
-                    # Apply Low-Pass Filter (Smoothing)
-                    # New Angle = (alpha * raw) + ((1-alpha) * old)
-                    self.smooth_angle = (self.alpha * raw_angle) + ((1 - self.alpha) * self.smooth_angle)
-                    
-                    # Use smoothed angle for logic
-                    if self.mode == "curl":
-                        if self.smooth_angle > down_thresh: self.stage = "down"
-                        if self.smooth_angle < up_thresh and self.stage == 'down':
-                            self.stage = "up"
-                            self.counter += 1
-                    elif self.mode == "squat":
-                        if self.smooth_angle < up_thresh: self.stage = "down"
-                        if self.smooth_angle > down_thresh and self.stage == 'down':
-                            self.stage = "up"
-                            self.counter += 1
+                # Counter Logic
+                if self.mode == "curl":
+                    if self.smooth_angle > down_thresh: self.stage = "down"
+                    if self.smooth_angle < up_thresh and self.stage == 'down':
+                        self.stage = "up"
+                        self.counter += 1
+                else: # Squat
+                    if self.smooth_angle < up_thresh: self.stage = "down"
+                    if self.smooth_angle > down_thresh and self.stage == 'down':
+                        self.stage = "up"
+                        self.counter += 1
 
-                    # --- DRAWING ---
-                    h, w, _ = img.shape
-                    
-                    # Draw Skeleton
-                    start = (int(p1[0]*w), int(p1[1]*h))
-                    mid = (int(p2[0]*w), int(p2[1]*h))
-                    end = (int(p3[0]*w), int(p3[1]*h))
-                    
-                    # Draw thick white lines
-                    cv2.line(img, start, mid, (255, 255, 255), 6)
-                    cv2.line(img, mid, end, (255, 255, 255), 6)
-                    
-                    # Draw joint with color coding based on accuracy
-                    # Green = Good form, Red = Bad form
-                    color = (0, 255, 0) # Green
-                    cv2.circle(img, mid, 15, color, -1)
-                    
-                    # Display the Angle (Debug Info)
-                    cv2.putText(img, str(int(self.smooth_angle)), 
-                               (mid[0]-20, mid[1]+50), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
-
-                # UI Box
+                # Visuals
+                h, w, _ = img.shape
+                # Draw skeleton
+                mp_drawing.draw_landmarks(img, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+                
+                # UI Overlay
                 cv2.rectangle(img, (0,0), (350, 120), (245,117,16), -1)
                 cv2.putText(img, self.mode.upper(), (20,30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,0), 2, cv2.LINE_AA)
-                cv2.putText(img, str(self.counter), (20,95), cv2.FONT_HERSHEY_SIMPLEX, 2, (255,255,255), 3, cv2.LINE_AA)
-                cv2.putText(img, self.stage, (130,95), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255), 3, cv2.LINE_AA)
+                cv2.putText(img, f"REPS: {self.counter}", (20,95), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255), 3, cv2.LINE_AA)
+                cv2.putText(img, self.stage, (220,95), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 2, cv2.LINE_AA)
 
             except Exception as e:
-                print(f"Error: {e}")
+                pass
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# --- 5. UI SETUP ---
-st.set_page_config(page_title="Gym AI Pro", layout="wide")
-st.title("Gym AI Coach Pro 🏋️‍♂️")
+# --- UI SETUP ---
+st.set_page_config(page_title="Gym AI Built-in", layout="wide")
+st.title("Gym AI Coach (Built-in Model) 🏋️‍♂️")
 
 col1, col2 = st.columns([2, 1])
 with col1:
@@ -166,26 +107,16 @@ with col2:
     st.write("") 
     reset_btn = st.button("Reset Counter", type="primary")
 
-# Local Config
-RTC_CONFIGURATION = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-
 ctx = webrtc_streamer(
-    key="gym-ai", 
+    key="gym-ai-builtin", 
     video_processor_factory=GymProcessor,
     mode=WebRtcMode.SENDRECV,
-    rtc_configuration=RTC_CONFIGURATION,
-    media_stream_constraints={
-        "video": {"width": 1280, "height": 720},
-        "audio": False,
-    },
+    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+    media_stream_constraints={"video": True, "audio": False},
     async_processing=True,
 )
 
 if ctx.video_processor:
-    if mode_selection == "Bicep Curl":
-        ctx.video_processor.mode = "curl"
-    else:
-        ctx.video_processor.mode = "squat"
+    ctx.video_processor.mode = "curl" if mode_selection == "Bicep Curl" else "squat"
     if reset_btn:
         ctx.video_processor.counter = 0
-        ctx.video_processor.stage = "down"
