@@ -10,9 +10,8 @@ import math
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
-# Custom drawing styles for Neon look
 NEON_GREEN = (20, 255, 57)
-NEON_BLUE = (255, 255, 57)
+NEON_GOLD = (0, 215, 255) # For Goal Achievement
 
 # --- MATH HELPERS ---
 def calculate_angle(a, b, c):
@@ -38,6 +37,7 @@ class GymProcessor(VideoProcessorBase):
         self.counter = 0
         self.stage = "up"
         self.mode = "curl"
+        self.goal = 10 # Default goal
         self.smooth_angle = 0
         self.alpha = 0.8 
         self.reset_cooldown = 0
@@ -46,10 +46,9 @@ class GymProcessor(VideoProcessorBase):
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
         img = cv2.resize(img, (1280, 720))
+        h, w, _ = img.shape
         
-        # Create a transparent overlay layer
         overlay = img.copy()
-        
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = self.pose.process(img_rgb)
         
@@ -62,28 +61,24 @@ class GymProcessor(VideoProcessorBase):
                 l_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
                 r_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
 
-                dist_r = get_distance(r_wrist, l_shoulder)
-                dist_l = get_distance(l_wrist, r_shoulder)
-
-                if dist_r < 0.12 and dist_l < 0.12 and self.reset_cooldown == 0:
+                if get_distance(r_wrist, l_shoulder) < 0.12 and get_distance(l_wrist, r_shoulder) < 0.12 and self.reset_cooldown == 0:
                     self.counter = 0
                     self.reset_cooldown = 50 
                 
-                if self.reset_cooldown > 0:
-                    self.reset_cooldown -= 1
+                if self.reset_cooldown > 0: self.reset_cooldown -= 1
 
                 # --- EXERCISE LOGIC ---
-                shoulder_pt = [l_shoulder.x, l_shoulder.y]
-                elbow_pt = [landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].y]
-                wrist_pt = [l_wrist.x, l_wrist.y]
-                hip_pt = [landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].x, landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].y]
-                knee_pt = [landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].y]
-                ankle_pt = [landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].y]
+                p_shoulder = [l_shoulder.x, l_shoulder.y]
+                p_elbow = [landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].y]
+                p_wrist = [l_wrist.x, l_wrist.y]
+                p_hip = [landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].x, landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].y]
+                p_knee = [landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].y]
+                p_ankle = [landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].y]
 
                 if self.mode in ["curl", "pushup"]:
-                    raw_angle = calculate_angle(shoulder_pt, elbow_pt, wrist_pt)
+                    raw_angle = calculate_angle(p_shoulder, p_elbow, p_wrist)
                 else:
-                    raw_angle = calculate_angle(hip_pt, knee_pt, ankle_pt)
+                    raw_angle = calculate_angle(p_hip, p_knee, p_ankle)
                 
                 self.smooth_angle = (self.alpha * raw_angle) + ((1 - self.alpha) * self.smooth_angle)
 
@@ -101,30 +96,33 @@ class GymProcessor(VideoProcessorBase):
                         self.stage = "up"; self.counter += 1
 
                 # --- NEON DRAWING ---
-                # Draw skeleton connections manually for custom color
+                color = NEON_GOLD if self.counter >= self.goal else NEON_GREEN
                 mp_drawing.draw_landmarks(
-                    img, 
-                    results.pose_landmarks, 
-                    mp_pose.POSE_CONNECTIONS,
-                    mp_drawing.DrawingSpec(color=(0, 0, 0), thickness=4, circle_radius=2),
-                    mp_drawing.DrawingSpec(color=NEON_GREEN, thickness=3, circle_radius=2)
+                    img, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
+                    mp_drawing.DrawingSpec(color=(0,0,0), thickness=4),
+                    mp_drawing.DrawingSpec(color=color, thickness=3)
                 )
                 
-                # --- TRANSPARENT UI ---
-                # Draw black rectangle on overlay
-                cv2.rectangle(overlay, (0,0), (450, 130), (0,0,0), -1)
-                # Blend overlay with original image (0.6 alpha)
+                # --- UI OVERLAY ---
+                cv2.rectangle(overlay, (0,0), (450, 150), (0,0,0), -1)
+                
+                # Progress Bar calculation
+                progress = min(self.counter / self.goal, 1.0)
+                bar_width = int(progress * 400)
+                cv2.rectangle(overlay, (20, 120), (420, 140), (50, 50, 50), -1) # Background bar
+                cv2.rectangle(overlay, (20, 120), (20 + bar_width, 140), color, -1) # Active bar
+
                 cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
                 
-                # Text elements
-                cv2.putText(img, f"MODE: {self.mode.upper()}", (20,35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+                # Labels
+                cv2.putText(img, f"GOAL: {self.goal}", (20,35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
                 cv2.putText(img, f"REPS: {self.counter}", (20,100), cv2.FONT_HERSHEY_SIMPLEX, 1.8, (255,255,255), 4)
                 
-                if self.reset_cooldown > 30:
-                    cv2.putText(img, "RESETTING...", (500, 360), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 5)
+                if self.counter >= self.goal:
+                    cv2.putText(img, "GOAL ACHIEVED!", (500, 360), cv2.FONT_HERSHEY_SIMPLEX, 2, NEON_GOLD, 5)
 
-                stage_color = NEON_GREEN if self.stage == "up" else (50, 220, 255)
-                cv2.putText(img, self.stage.upper(), (280,100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, stage_color, 3)
+                stage_text_color = color if self.stage == "up" else (50, 220, 255)
+                cv2.putText(img, self.stage.upper(), (280,100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, stage_text_color, 3)
 
             except Exception as e:
                 pass
@@ -136,14 +134,19 @@ st.set_page_config(layout="wide")
 
 col1, col2 = st.columns([3, 1])
 with col1:
-    mode_selection = st.radio("EXERCISE", ["Bicep Curl", "Squat", "Pushup"], horizontal=True)
+    ex_col, goal_col = st.columns([2, 1])
+    with ex_col:
+        mode_selection = st.radio("EXERCISE", ["Bicep Curl", "Squat", "Pushup"], horizontal=True)
+    with goal_col:
+        goal_selection = st.number_input("SET GOAL", min_value=1, max_value=100, value=10)
+
 with col2:
     st.markdown("### Controls")
     st.info("🙅‍♂️ Touch shoulders to reset")
     reset_btn = st.button("Manual Reset", use_container_width=True)
 
 ctx = webrtc_streamer(
-    key="gym-ai-neon", 
+    key="gym-ai-goal", 
     video_processor_factory=GymProcessor,
     mode=WebRtcMode.SENDRECV,
     rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
@@ -153,5 +156,6 @@ ctx = webrtc_streamer(
 
 if ctx.video_processor:
     ctx.video_processor.mode = mode_selection.lower().replace("bicep ", "")
+    ctx.video_processor.goal = goal_selection
     if reset_btn:
         ctx.video_processor.counter = 0
