@@ -1,22 +1,25 @@
 import cv2
 import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 import numpy as np
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
+import urllib.request
+import os
 
-# --- OPTIMIZATION 1: Cache the AI Model ---
-# This prevents the app from reloading the model 30 times a second
-@st.cache_resource
-def get_pose_model():
-    mp_pose = mp.solutions.pose
-    # Reduced complexity to 0 (fastest) for cloud
-    return mp_pose.Pose(
-        model_complexity=0, 
-        min_detection_confidence=0.5, 
-        min_tracking_confidence=0.5
-    )
+# --- CONFIGURATION ---
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose/pose_landmarker/float16/1/pose_landmarker_lite.task"
+MODEL_PATH = "pose_landmarker.task"
 
-# --- Geometry Helper ---
+# --- HELPER: AUTO-DOWNLOAD MODEL ---
+def download_model():
+    if not os.path.exists(MODEL_PATH):
+        print("📥 Downloading AI Model...")
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+        print("✅ Download Complete!")
+
+# --- GEOMETRY HELPER ---
 def calculate_angle(a, b, c):
     a = np.array(a)
     b = np.array(b)
@@ -26,44 +29,49 @@ def calculate_angle(a, b, c):
     if angle > 180.0: angle = 360 - angle
     return angle
 
-# --- The Processor Class ---
+# --- OPTIMIZATION: Cache the AI Detector ---
+@st.cache_resource
+def get_detector():
+    # 1. Ensure model exists before loading
+    download_model()
+    
+    # 2. Load the model from the LOCAL file
+    base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
+    options = vision.PoseLandmarkerOptions(
+        base_options=base_options,
+        output_segmentation_masks=False)
+    return vision.PoseLandmarker.create_from_options(options)
+
+# --- THE PROCESSOR ---
 class GymProcessor(VideoTransformerBase):
     def __init__(self):
-        self.pose = get_pose_model()
-        self.mp_drawing = mp.solutions.drawing_utils
-        self.mp_pose = mp.solutions.pose
+        self.detector = get_detector()
         
         # State variables
         self.counter = 0
         self.stage = "down"
-        self.feedback = "Start"
 
     def transform(self, frame):
-        # Convert frame to numpy array
+        # 1. Convert frame
         img = frame.to_ndarray(format="bgr24")
         
-        # --- OPTIMIZATION 2: Resize Frame ---
-        # Force 480p to save memory bandwidth
+        # 2. Resize to 480p (Save Cloud RAM)
         img = cv2.resize(img, (640, 480))
-
-        h, w, _ = img.shape
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
         
-        # Inference
-        results = self.pose.process(img_rgb)
-
-        if results.pose_landmarks:
-            landmarks = results.pose_landmarks.landmark
+        # 3. Inference
+        detection_result = self.detector.detect(mp_image)
+        
+        # 4. Logic & Drawing
+        if detection_result.pose_landmarks:
+            landmarks = detection_result.pose_landmarks[0]
             
-            # Get Coordinates (Curl Mode)
-            # You can add the switch logic here later
             try:
-                p1 = [landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER.value].x, 
-                      landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER.value].y]
-                p2 = [landmarks[self.mp_pose.PoseLandmark.RIGHT_ELBOW.value].x, 
-                      landmarks[self.mp_pose.PoseLandmark.RIGHT_ELBOW.value].y]
-                p3 = [landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST.value].x, 
-                      landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST.value].y]
+                # Get Coordinates (Indexes: 12=Shoulder, 14=Elbow, 16=Wrist)
+                p1 = [landmarks[12].x, landmarks[12].y]
+                p2 = [landmarks[14].x, landmarks[14].y]
+                p3 = [landmarks[16].x, landmarks[16].y]
                 
                 angle = calculate_angle(p1, p2, p3)
                 
@@ -72,39 +80,40 @@ class GymProcessor(VideoTransformerBase):
                 if angle < 40 and self.stage == 'down':
                     self.stage = "up"
                     self.counter += 1
-                    self.feedback = "Good Rep!"
+
+                # Visualization
+                h, w, _ = img.shape
                 
-                # Visualize
                 # Draw Box
                 cv2.rectangle(img, (0,0), (200, 80), (245,117,16), -1)
                 
-                # Rep Data
-                cv2.putText(img, 'REPS', (15,12), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1, cv2.LINE_AA)
-                cv2.putText(img, str(self.counter), (10,60), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 2, (255,255,255), 2, cv2.LINE_AA)
-                
-                # Feedback
-                cv2.putText(img, self.stage, (80,60), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2, cv2.LINE_AA)
-                
-                self.mp_drawing.draw_landmarks(img, results.pose_landmarks, self.mp_pose.POSE_CONNECTIONS)
-                
-            except:
-                pass
+                # Draw Text
+                cv2.putText(img, 'REPS', (15,12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1, cv2.LINE_AA)
+                cv2.putText(img, str(self.counter), (10,60), cv2.FONT_HERSHEY_SIMPLEX, 2, (255,255,255), 2, cv2.LINE_AA)
+                cv2.putText(img, self.stage, (80,60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2, cv2.LINE_AA)
+
+                # Simple Line Drawing (Manual)
+                start_point = (int(p1[0]*w), int(p1[1]*h))
+                end_point = (int(p2[0]*w), int(p2[1]*h))
+                cv2.line(img, start_point, end_point, (255, 255, 255), 4)
+
+                start_point = (int(p2[0]*w), int(p2[1]*h))
+                end_point = (int(p3[0]*w), int(p3[1]*h))
+                cv2.line(img, start_point, end_point, (255, 255, 255), 4)
+
+            except Exception as e:
+                print(f"Error: {e}")
 
         return img
 
-# --- Streamlit UI ---
+# --- UI SETUP ---
 st.title("Gym AI Lite ⚡")
-st.write("Memory-Optimized for Cloud")
+st.write("Processing in Cloud...")
 
-# WebRTC Streamer
 ctx = webrtc_streamer(
     key="gym-ai", 
     video_transformer_factory=GymProcessor,
     mode=WebRtcMode.SENDRECV,
-    # --- OPTIMIZATION 3: Limit Input Resolution ---
     media_stream_constraints={"video": {"width": 640, "height": 480}},
     async_processing=True,
 )
