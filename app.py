@@ -53,10 +53,12 @@ class GymProcessor(VideoProcessorBase):
         self.detector = get_detector()
         self.counter = 0
         self.stage = "down"
-        self.mode = "curl"  # Default mode
+        self.mode = "curl"
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
+        
+        # Optimize resolution for cloud performance
         img = cv2.resize(img, (640, 480))
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
@@ -70,7 +72,7 @@ class GymProcessor(VideoProcessorBase):
             try:
                 p1, p2, p3 = None, None, None
                 
-                # --- LOGIC ---
+                # Logic
                 if self.mode == "curl":
                     p1 = [landmarks[12].x, landmarks[12].y]
                     p2 = [landmarks[14].x, landmarks[14].y]
@@ -93,7 +95,7 @@ class GymProcessor(VideoProcessorBase):
                         self.stage = "up"
                         self.counter += 1
 
-                # --- DRAWING ---
+                # Drawing
                 h, w, _ = img.shape
                 cv2.rectangle(img, (0,0), (250, 80), (245,117,16), -1)
                 cv2.putText(img, self.mode.upper(), (10,12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1, cv2.LINE_AA)
@@ -113,26 +115,24 @@ class GymProcessor(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # --- 5. STREAMLIT UI ---
-st.set_page_config(page_title="Gym AI", layout="centered") # Centered looks better for main UI controls
+st.set_page_config(page_title="Gym AI", layout="centered")
 st.title("Gym AI Coach 🏋️")
 
-# --- CONTROLS (Main UI) ---
-# Create two columns to put buttons side-by-side
 col1, col2 = st.columns([2, 1])
-
 with col1:
-    # Horizontal radio button for mode
     mode_selection = st.radio("Select Exercise:", ["Bicep Curl", "Squat"], horizontal=True)
-
 with col2:
-    # Spacer to align button with the radio inputs
     st.write("") 
     st.write("") 
     reset_btn = st.button("Reset Counter", type="primary")
 
-# Network Config
+# --- NETWORK CONFIGURATION (FIXED) ---
 RTC_CONFIGURATION = {
-    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302"]},
+    ]
 }
 
 # Start Stream
@@ -142,7 +142,8 @@ ctx = webrtc_streamer(
     mode=WebRtcMode.SENDRECV,
     rtc_configuration=RTC_CONFIGURATION,
     media_stream_constraints={
-        "video": {"width": {"min": 800, "ideal": 1280}, "height": {"min": 600, "ideal": 720}}
+        "video": {"width": {"min": 800, "ideal": 1280}, "height": {"min": 600, "ideal": 720}},
+        "audio": False,  # <--- DISABLE AUDIO TO PREVENT CRASHES
     },
     async_processing=True,
 )
