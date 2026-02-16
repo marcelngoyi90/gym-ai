@@ -96,18 +96,21 @@ class GymProcessor(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # --- UI SETUP ---
-import av # Needed for new video processor type
+import av
 st.title("Gym AI Lite ⚡")
 
-if not os.path.exists(MODEL_PATH):
-    st.error(f"⚠️ FILE MISSING: Please upload '{MODEL_PATH}' to your GitHub repository.")
-else:
-    # START THE STREAM
-    ctx = webrtc_streamer(
-        key="gym-ai", 
-        video_processor_factory=GymProcessor,  # <--- UPDATED NAME
-        mode=WebRtcMode.SENDRECV,
-        media_stream_constraints={"video": {"width": 640, "height": 480}},
-        async_processing=True,
-        
-    )
+# 1. Define the STUN servers (Google's free public servers)
+# This allows the app to bypass the cloud firewall
+RTC_CONFIGURATION = {
+    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+}
+
+# 2. Start the Streamer with the new config
+ctx = webrtc_streamer(
+    key="gym-ai", 
+    video_processor_factory=GymProcessor,
+    mode=WebRtcMode.SENDRECV,
+    rtc_configuration=RTC_CONFIGURATION,  # <--- THIS IS THE FIX
+    media_stream_constraints={"video": {"width": 640, "height": 480}},
+    async_processing=True,
+)
