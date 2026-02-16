@@ -11,7 +11,7 @@ mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
 NEON_GREEN = (20, 255, 57)
-NEON_GOLD = (0, 215, 255) # For Goal Achievement
+NEON_GOLD = (0, 215, 255)
 
 # --- MATH HELPERS ---
 def calculate_angle(a, b, c):
@@ -37,7 +37,7 @@ class GymProcessor(VideoProcessorBase):
         self.counter = 0
         self.stage = "up"
         self.mode = "curl"
-        self.goal = 10 # Default goal
+        self.goal = 10 
         self.smooth_angle = 0
         self.alpha = 0.8 
         self.reset_cooldown = 0
@@ -55,7 +55,6 @@ class GymProcessor(VideoProcessorBase):
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
             try:
-                # --- RESET LOGIC ---
                 l_wrist = landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value]
                 r_wrist = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value]
                 l_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
