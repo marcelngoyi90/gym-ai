@@ -142,8 +142,12 @@ ctx = webrtc_streamer(
     mode=WebRtcMode.SENDRECV,
     rtc_configuration=RTC_CONFIGURATION,
     media_stream_constraints={
-        "video": {"width": {"min": 800, "ideal": 1280}, "height": {"min": 600, "ideal": 720}},
-        "audio": False,  # <--- DISABLE AUDIO TO PREVENT CRASHES
+        "video": {
+            # We request a lower resolution to keep the network fast
+            "width": {"min": 480, "ideal": 640, "max": 640},
+            "height": {"min": 360, "ideal": 480, "max": 480},
+        },
+        "audio": False, # Keep audio disabled to prevent crashes
     },
     async_processing=True,
 )
