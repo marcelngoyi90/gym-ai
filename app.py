@@ -7,12 +7,25 @@ import numpy as np
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 import os
+import urllib.request
 
 # --- CONFIGURATION ---
-# Make sure your uploaded file is named exactly this:
-MODEL_PATH = "pose_landmarker.task" 
+# We go back to Lite for speed, but we will use Math to make it accurate
+MODEL_PATH = "pose_landmarker.task"
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
 
-# --- MATH HELPER ---
+# --- 1. DOWNLOADER ---
+def force_download_model():
+    # If the file exists but is the wrong size (Full model is >5MB, Lite is ~4.8MB)
+    # We just overwrite it to be safe.
+    if not os.path.exists(MODEL_PATH):
+        print(f"📥 Downloading Lite Model...")
+        try:
+            urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+        except Exception as e:
+            st.error(f"Failed to download model: {e}")
+
+# --- 2. MATH HELPERS ---
 def calculate_angle(a, b, c):
     a = np.array(a)
     b = np.array(b)
@@ -22,42 +35,47 @@ def calculate_angle(a, b, c):
     if angle > 180.0: angle = 360 - angle
     return angle
 
-# --- AI LOADER (HEAVY VERSION) ---
+# --- 3. AI LOADER ---
 @st.cache_resource
 def get_detector():
-    if not os.path.exists(MODEL_PATH):
-        st.error("Model file missing! Please upload pose_landmarker_full.task and rename it to pose_landmarker.task")
-        return None
-
+    force_download_model()
+    if not os.path.exists(MODEL_PATH): return None
     base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
     options = vision.PoseLandmarkerOptions(
         base_options=base_options,
-        output_segmentation_masks=False,
-        min_pose_detection_confidence=0.5, # Helps filter bad frames
-        min_pose_presence_confidence=0.5,
-        min_tracking_confidence=0.5 # Keeps the skeleton 'sticky'
-    )
+        output_segmentation_masks=False)
     return vision.PoseLandmarker.create_from_options(options)
 
-# --- THE GYM PROCESSOR ---
+# --- 4. THE GYM PROCESSOR ---
 class GymProcessor(VideoProcessorBase):
     def __init__(self):
         self.detector = get_detector()
         self.counter = 0
         self.stage = "down"
-        self.mode = "curl" # Default
+        self.mode = "curl"
+        
+        # OPTIMIZATION VARS
+        self.frame_count = 0 
+        self.prev_angle = 0  # To smooth out the jitter
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         
-        # We MUST keep resolution low (480p) to run the Heavy model on Cloud
+        # 1. SKIP FRAMES (Critical for Cloud Performance)
+        # We only run AI on every 3rd frame. 
+        # The other frames just pass through.
+        self.frame_count += 1
+        if self.frame_count % 3 != 0:
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+        # 2. Resize
         img = cv2.resize(img, (640, 480))
-        
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
         
         if self.detector is None: return av.VideoFrame.from_ndarray(img, format="bgr24")
 
+        # 3. Detect
         detection_result = self.detector.detect(mp_image)
         
         if detection_result.pose_landmarks:
@@ -65,55 +83,57 @@ class GymProcessor(VideoProcessorBase):
             try:
                 p1, p2, p3 = None, None, None
                 
-                # --- LOGIC ---
                 if self.mode == "curl":
-                    # 12=Shoulder, 14=Elbow, 16=Wrist
                     p1 = [landmarks[12].x, landmarks[12].y]
                     p2 = [landmarks[14].x, landmarks[14].y]
                     p3 = [landmarks[16].x, landmarks[16].y]
-                    angle = calculate_angle(p1, p2, p3)
+                    raw_angle = calculate_angle(p1, p2, p3)
                     
+                    # SMOOTHING FILTER: 
+                    # 70% new value, 30% old value. This removes the "shaking".
+                    angle = (0.7 * raw_angle) + (0.3 * self.prev_angle)
+                    self.prev_angle = angle
+
                     if angle > 160: self.stage = "down"
                     if angle < 40 and self.stage == 'down':
                         self.stage = "up"
                         self.counter += 1
 
                 elif self.mode == "squat":
-                    # 24=Hip, 26=Knee, 28=Ankle
                     p1 = [landmarks[24].x, landmarks[24].y]
                     p2 = [landmarks[26].x, landmarks[26].y]
                     p3 = [landmarks[28].x, landmarks[28].y]
-                    angle = calculate_angle(p1, p2, p3)
+                    raw_angle = calculate_angle(p1, p2, p3)
+                    
+                    # SMOOTHING
+                    angle = (0.7 * raw_angle) + (0.3 * self.prev_angle)
+                    self.prev_angle = angle
                     
                     if angle < 75: self.stage = "down"
                     if angle > 160 and self.stage == 'down':
                         self.stage = "up"
                         self.counter += 1
 
-                # --- DRAWING ---
+                # Drawing
                 h, w, _ = img.shape
-                
-                # Info Box
                 cv2.rectangle(img, (0,0), (250, 80), (245,117,16), -1)
                 cv2.putText(img, self.mode.upper(), (10,12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1, cv2.LINE_AA)
                 cv2.putText(img, str(self.counter), (10,60), cv2.FONT_HERSHEY_SIMPLEX, 2, (255,255,255), 2, cv2.LINE_AA)
                 cv2.putText(img, self.stage, (100,60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2, cv2.LINE_AA)
 
-                # Skeleton
                 if p1 and p2 and p3:
                     start = (int(p1[0]*w), int(p1[1]*h))
                     mid = (int(p2[0]*w), int(p2[1]*h))
                     end = (int(p3[0]*w), int(p3[1]*h))
                     cv2.line(img, start, mid, (255, 255, 255), 4)
                     cv2.line(img, mid, end, (255, 255, 255), 4)
-                    cv2.circle(img, mid, 8, (0, 0, 255), -1)
 
             except Exception as e:
                 print(f"Error: {e}")
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# --- STREAMLIT UI ---
+# --- 5. UI SETUP ---
 st.set_page_config(page_title="Gym AI", layout="centered")
 st.title("Gym AI Coach 🏋️")
 
@@ -125,7 +145,7 @@ with col2:
     st.write("") 
     reset_btn = st.button("Reset Counter", type="primary")
 
-# Network Config (Critical for Cloud)
+# Network Config
 RTC_CONFIGURATION = {
     "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
 }
@@ -142,7 +162,7 @@ ctx = webrtc_streamer(
     async_processing=True,
 )
 
-# --- BRIDGE ---
+# --- 6. BRIDGE ---
 if ctx.video_processor:
     if mode_selection == "Bicep Curl":
         ctx.video_processor.mode = "curl"
