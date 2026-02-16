@@ -4,6 +4,7 @@ import mediapipe as mp
 import numpy as np
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+import math
 
 # --- INITIALIZE MEDIAPIPE ---
 mp_pose = mp.solutions.pose
@@ -18,6 +19,9 @@ def calculate_angle(a, b, c):
     angle = np.abs(radians*180.0/np.pi)
     if angle > 180.0: angle = 360 - angle
     return angle
+
+def get_distance(p1, p2):
+    return math.sqrt((p1.x - p2.x)**2 + (p1.y - p2.y)**2)
 
 # --- THE GYM PROCESSOR ---
 class GymProcessor(VideoProcessorBase):
@@ -36,7 +40,7 @@ class GymProcessor(VideoProcessorBase):
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1)
+        img = cv2.flip(img, 1) # Mirror for natural feel
         img = cv2.resize(img, (1280, 720))
         
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -45,27 +49,29 @@ class GymProcessor(VideoProcessorBase):
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
             try:
-                # --- DETECT X-CROSS GESTURE ---
-                # Check if Right Wrist is to the LEFT of Left Shoulder 
-                # AND Left Wrist is to the RIGHT of Right Shoulder
+                # --- NEW RESET LOGIC: TOUCH SHOULDERS ---
                 l_wrist = landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value]
                 r_wrist = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value]
                 l_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
                 r_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
 
-                # In a flipped image, if wrists cross past the opposite shoulders:
-                if r_wrist.x > l_shoulder.x and l_wrist.x < r_shoulder.x and self.reset_cooldown == 0:
+                # Calculate distance between Right Wrist -> Left Shoulder 
+                # AND Left Wrist -> Right Shoulder
+                dist_r = get_distance(r_wrist, l_shoulder)
+                dist_l = get_distance(l_wrist, r_shoulder)
+
+                # If both hands are very close to opposite shoulders
+                if dist_r < 0.12 and dist_l < 0.12 and self.reset_cooldown == 0:
                     self.counter = 0
-                    self.reset_cooldown = 40 # Prevent flickering reset
+                    self.reset_cooldown = 50 # Longer cooldown for a clear reset
                 
                 if self.reset_cooldown > 0:
                     self.reset_cooldown -= 1
 
-                # --- EXERCISE LOGIC ---
-                # Using Left side for calculations
-                shoulder = [landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value].x, landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value].y]
+                # --- EXERCISE LOGIC (Using Left Side) ---
+                shoulder = [l_shoulder.x, l_shoulder.y]
                 elbow = [landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].y]
-                wrist = [landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value].x, landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value].y]
+                wrist = [l_wrist.x, l_wrist.y]
                 hip = [landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].x, landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].y]
                 knee = [landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].y]
                 ankle = [landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].y]
@@ -77,6 +83,7 @@ class GymProcessor(VideoProcessorBase):
                 
                 self.smooth_angle = (self.alpha * raw_angle) + ((1 - self.alpha) * self.smooth_angle)
 
+                # Logic Gates
                 if self.mode == "pushup":
                     if self.smooth_angle < 95: self.stage = "down"
                     if self.smooth_angle > 155 and self.stage == "down":
@@ -98,9 +105,9 @@ class GymProcessor(VideoProcessorBase):
                 cv2.putText(img, f"MODE: {self.mode.upper()}", (20,30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,0), 2, cv2.LINE_AA)
                 cv2.putText(img, f"REPS: {self.counter}", (20,95), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255), 3, cv2.LINE_AA)
                 
-                # Reset Visual Feedback
-                if self.reset_cooldown > 20:
-                    cv2.putText(img, "COUNTER RESET!", (600, 360), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 5)
+                # Reset Feedback
+                if self.reset_cooldown > 30:
+                    cv2.putText(img, "RESETTING...", (500, 360), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 5)
 
                 stage_color = (0, 255, 0) if self.stage == "up" else (0, 255, 255)
                 cv2.putText(img, self.stage.upper(), (280,95), cv2.FONT_HERSHEY_SIMPLEX, 1.2, stage_color, 2, cv2.LINE_AA)
@@ -110,19 +117,19 @@ class GymProcessor(VideoProcessorBase):
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# --- UI SETUP ---
-st.set_page_config(page_title="Gym AI Gesture", layout="wide")
-st.title("Gym AI Coach: 'X' Gesture Reset 🙅‍♂️")
+# --- UI ---
+st.set_page_config(page_title="Gym AI Shoulder Reset", layout="wide")
+st.title("Gym AI Coach: Touch Shoulders to Reset 🙅‍♂️")
 
 col1, col2 = st.columns([2, 1])
 with col1:
     mode_selection = st.radio("Select Exercise:", ["Bicep Curl", "Squat", "Pushup"], horizontal=True)
 with col2:
-    st.info("💡 Cross your arms in an 'X' to reset the counter!")
+    st.info("💡 Cross your arms and touch your opposite shoulders to reset!")
     reset_btn = st.button("Manual Reset", type="primary")
 
 ctx = webrtc_streamer(
-    key="gym-ai-x-gesture", 
+    key="gym-ai-shoulder-reset", 
     video_processor_factory=GymProcessor,
     mode=WebRtcMode.SENDRECV,
     rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
