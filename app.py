@@ -10,6 +10,10 @@ import math
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
+# Custom drawing styles for Neon look
+NEON_GREEN = (20, 255, 57)
+NEON_BLUE = (255, 255, 57)
+
 # --- MATH HELPERS ---
 def calculate_angle(a, b, c):
     a = np.array(a)
@@ -40,8 +44,11 @@ class GymProcessor(VideoProcessorBase):
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1) # Mirror for natural feel
+        img = cv2.flip(img, 1)
         img = cv2.resize(img, (1280, 720))
+        
+        # Create a transparent overlay layer
+        overlay = img.copy()
         
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = self.pose.process(img_rgb)
@@ -49,41 +56,37 @@ class GymProcessor(VideoProcessorBase):
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
             try:
-                # --- NEW RESET LOGIC: TOUCH SHOULDERS ---
+                # --- RESET LOGIC ---
                 l_wrist = landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value]
                 r_wrist = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value]
                 l_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
                 r_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
 
-                # Calculate distance between Right Wrist -> Left Shoulder 
-                # AND Left Wrist -> Right Shoulder
                 dist_r = get_distance(r_wrist, l_shoulder)
                 dist_l = get_distance(l_wrist, r_shoulder)
 
-                # If both hands are very close to opposite shoulders
                 if dist_r < 0.12 and dist_l < 0.12 and self.reset_cooldown == 0:
                     self.counter = 0
-                    self.reset_cooldown = 50 # Longer cooldown for a clear reset
+                    self.reset_cooldown = 50 
                 
                 if self.reset_cooldown > 0:
                     self.reset_cooldown -= 1
 
-                # --- EXERCISE LOGIC (Using Left Side) ---
-                shoulder = [l_shoulder.x, l_shoulder.y]
-                elbow = [landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].y]
-                wrist = [l_wrist.x, l_wrist.y]
-                hip = [landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].x, landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].y]
-                knee = [landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].y]
-                ankle = [landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].y]
+                # --- EXERCISE LOGIC ---
+                shoulder_pt = [l_shoulder.x, l_shoulder.y]
+                elbow_pt = [landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].y]
+                wrist_pt = [l_wrist.x, l_wrist.y]
+                hip_pt = [landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].x, landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].y]
+                knee_pt = [landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].y]
+                ankle_pt = [landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].y]
 
                 if self.mode in ["curl", "pushup"]:
-                    raw_angle = calculate_angle(shoulder, elbow, wrist)
-                else: # Squat
-                    raw_angle = calculate_angle(hip, knee, ankle)
+                    raw_angle = calculate_angle(shoulder_pt, elbow_pt, wrist_pt)
+                else:
+                    raw_angle = calculate_angle(hip_pt, knee_pt, ankle_pt)
                 
                 self.smooth_angle = (self.alpha * raw_angle) + ((1 - self.alpha) * self.smooth_angle)
 
-                # Logic Gates
                 if self.mode == "pushup":
                     if self.smooth_angle < 95: self.stage = "down"
                     if self.smooth_angle > 155 and self.stage == "down":
@@ -97,39 +100,50 @@ class GymProcessor(VideoProcessorBase):
                     if self.smooth_angle > 160 and self.stage == 'down':
                         self.stage = "up"; self.counter += 1
 
-                # --- DRAWING ---
-                mp_drawing.draw_landmarks(img, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+                # --- NEON DRAWING ---
+                # Draw skeleton connections manually for custom color
+                mp_drawing.draw_landmarks(
+                    img, 
+                    results.pose_landmarks, 
+                    mp_pose.POSE_CONNECTIONS,
+                    mp_drawing.DrawingSpec(color=(0, 0, 0), thickness=4, circle_radius=2),
+                    mp_drawing.DrawingSpec(color=NEON_GREEN, thickness=3, circle_radius=2)
+                )
                 
-                # Visual UI
-                cv2.rectangle(img, (0,0), (550, 120), (245,117,16), -1)
-                cv2.putText(img, f"MODE: {self.mode.upper()}", (20,30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,0), 2, cv2.LINE_AA)
-                cv2.putText(img, f"REPS: {self.counter}", (20,95), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255), 3, cv2.LINE_AA)
+                # --- TRANSPARENT UI ---
+                # Draw black rectangle on overlay
+                cv2.rectangle(overlay, (0,0), (450, 130), (0,0,0), -1)
+                # Blend overlay with original image (0.6 alpha)
+                cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
                 
-                # Reset Feedback
+                # Text elements
+                cv2.putText(img, f"MODE: {self.mode.upper()}", (20,35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+                cv2.putText(img, f"REPS: {self.counter}", (20,100), cv2.FONT_HERSHEY_SIMPLEX, 1.8, (255,255,255), 4)
+                
                 if self.reset_cooldown > 30:
                     cv2.putText(img, "RESETTING...", (500, 360), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 5)
 
-                stage_color = (0, 255, 0) if self.stage == "up" else (0, 255, 255)
-                cv2.putText(img, self.stage.upper(), (280,95), cv2.FONT_HERSHEY_SIMPLEX, 1.2, stage_color, 2, cv2.LINE_AA)
+                stage_color = NEON_GREEN if self.stage == "up" else (50, 220, 255)
+                cv2.putText(img, self.stage.upper(), (280,100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, stage_color, 3)
 
             except Exception as e:
                 pass
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# --- UI ---
-st.set_page_config(page_title="Gym AI Shoulder Reset", layout="wide")
-st.title("Gym AI Coach: Touch Shoulders to Reset 🙅‍♂️")
+# --- STREAMLIT UI ---
+st.set_page_config(layout="wide")
 
-col1, col2 = st.columns([2, 1])
+col1, col2 = st.columns([3, 1])
 with col1:
-    mode_selection = st.radio("Select Exercise:", ["Bicep Curl", "Squat", "Pushup"], horizontal=True)
+    mode_selection = st.radio("EXERCISE", ["Bicep Curl", "Squat", "Pushup"], horizontal=True)
 with col2:
-    st.info("💡 Cross your arms and touch your opposite shoulders to reset!")
-    reset_btn = st.button("Manual Reset", type="primary")
+    st.markdown("### Controls")
+    st.info("🙅‍♂️ Touch shoulders to reset")
+    reset_btn = st.button("Manual Reset", use_container_width=True)
 
 ctx = webrtc_streamer(
-    key="gym-ai-shoulder-reset", 
+    key="gym-ai-neon", 
     video_processor_factory=GymProcessor,
     mode=WebRtcMode.SENDRECV,
     rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
